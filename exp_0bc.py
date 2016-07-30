@@ -5,10 +5,14 @@ from tabulate import tabulate
 import math
 import os
 from pathlib import Path
+import pickle
 
 from utils import recordclassdef, expectValue
 from bindata import BinData
 import obj_file
+
+from types_0bc import CommonRecordHeader
+from types_0bc import Key
 
 ProcessingContext = recordclassdef('ProcessingContext', ['header', 'filename', 'filepath', 'exportPath', 'expectedFormat'])
 Header0BC = recordclassdef('Header0BC', ['countRecords', 'sizeRecords', 'offsetToSomething', 'maybeDataType'])
@@ -29,39 +33,6 @@ PhysFooter = recordclassdef('PhysFooter', ['bboxesDataOffset', 'verticesOffset',
 
 # Key = recordclassdef('Key', ['typeId', 'ident', 'index'])
 
-class Key:
-    @staticmethod
-    def getTypeFromKeyBits(key):
-        num = (key >> 48);
-        num = (((num >> 1) & 0x55555555) | ((num & 0x55555555) << 1));
-        num = (((num >> 2) & 0x33333333) | ((num & 0x33333333) << 2));
-        num = (((num >> 4) & 0x0F0F0F0F) | ((num & 0x0F0F0F0F) << 4));
-        num = (((num >> 8) & 0x00FF00FF) | ((num & 0x00FF00FF) << 8));
-        num = ((num >> 16) | (num << 16));
-        num >>= 20;
-        return num + 1;
-
-    def __init__(self, bd):
-        self.typeId = 0
-        self.index = 0
-        self.ident = 0
-        if bd:
-            self.read(bd)
-
-    def read(self, bd):
-        keyBytes = [0] * 8
-        for i in range(8):
-            keyBytes[7 - i] = bd.readU8()
-        value = 0
-        for b in keyBytes:
-            value = (value << 8) | b
-
-        self.typeId = Key.getTypeFromKeyBits(value)
-        self.index = value & 0xFFFFFFFFFFFF
-        self.ident = (value >> 32) & 0xFFFF
-
-    def __str__(self):
-        return '{:012x}.{:03x}'.format(self.index, self.typeId)
 
 def sumSqr(vals):
     return sum(map(lambda x: x*x, vals))
@@ -201,6 +172,7 @@ def readRecords0BC_format_12(bd, context):
     print(tabulate(tab, floatfmt='.6'))
     pass
 
+
 def readRecords0BC(bd, context):
     print('readRecords0BC')
 
@@ -216,30 +188,6 @@ def readRecords0BC(bd, context):
     if context.expectedFormat > 0x10:
         print('might be an unknown format')
         return
-
-
-    class CommonRecordHeader:
-        headerSize = 16 + 2 + 2 + 4
-
-        def __init__(self, bd):
-            self.guid = '00000000000000000000000000000000'
-            self.unk = 0
-            self.type = 0
-            self.recordSize = 0
-            self.recordStartOffset = 0
-            if bd:
-                self.read(bd)
-
-        def read(self, bd):
-            self.recordStartOffset = bd.tell()
-            self.guid = bd.readHex(16)
-            val = 0
-            self.unk = bd.readU16BE()
-            self.type = bd.readU16BE()
-            self.recordSize = bd.readU32()
-
-        def __str__(self):
-            return '{0} {1:04x} {2:04x} {3}'.format(self.guid, self.unk, self.type, self.recordSize)
 
     class Format_Unk:
         @staticmethod
@@ -271,57 +219,121 @@ def readRecords0BC(bd, context):
             obj_file.writeVertices(f, points)
 
 
+    def dumpData(tab, nameSuffix, context):
+        path = context.exportPath / (context.filename + nameSuffix)
+        print('dumpData', str(path))
+        with path.open(mode='wb') as f:
+            pickle.dump(tab, f, 3)
+
     class Format_01:
         @staticmethod
         def read(bd, row, recHeader):
+
+            def r(lf):
+                # return tuple(round(f,4) for f in lf)
+                return lf
+
             assert(recHeader.recordSize >= 160)
+
+            recordEndOffset = recHeader.recordStartOffset + recHeader.recordSize
+            print('recordStartOffset =', recHeader.recordStartOffset)
+            print('recordEndOffset =', recordEndOffset)
 
             tmp = []
 
             row.append(Key(bd))          # keyRef00c, reference to .00c
-            row.append(bd.readU32())     # unkCount1
-            unkCount1 = row[-1]
-            row.append(bd.readU32())     # unkCount2
-            unkCount2 = row[-1]
+            row.append(bd.readU32())     # groupsCount
+            groupsCount = row[-1]
+            row.append(bd.readU32())     # totalGroupRecordsCount
+            totalGroupRecordsCount = row[-1]
             row.append(bd.readHex(4))    # unk bitmask
             row.append(bd.read2F32())    # unkFloats1, big range
-            row.append(bd.readF32())     # unkFloat2
+            row.append(bd.readU32())     # unk
+            expectValue(row[-1], 0, 'Format_01 unk is not zero')
             # 56
             # print(bd.tell() - recHeader.recordStartOffset)
-            row.append(Key(bd))         # keyRef01a reference to .01a
-            row.append(bd.readU32())    # unk size?
-            unkSize = row[-1]
-            row.append(bd.readU32())    # unk count3?
-            unkCount3 = row[-1]
-            assert(unkCount3 <= unkCount2)
-            row.append(bd.read3F32())  # pos
-            row.append(bd.read3F32())  # scl
-            row.append(bd.read4F32())  # quat
-            for i in range(7): row.append(bd.readHex(4)) # unkBitmask2
-            for i in range(5): row.append(bd.readI32())  # unkInts
 
-            if unkCount2 > 1:
-                tmp.append(bd.read3F32())  # pos
-                tmp.append(bd.read3F32())  # scl
-                tmp.append(bd.read4F32())  # quat
-                
-                # for i in range(7): row.append(bd.readHex(4))
-                # for i in range(5): row.append(bd.readI32())
+            groupRecordsCountSoFar = 0
 
-                # for i in range(7): row.append(bd.readHex(4))
-                # for i in range(10): row.append(bd.readF32())
+            def readGroupObjectRecord(bd, records):
+                rec = []
+                rec.append(r(bd.read3F32()))  # pos
+                rec.append(r(bd.read3F32()))  # scl
+                rec.append(r(bd.read4F32()))  # quat
+                for i in range(7): rec.append(bd.readHex(4)) # unkBitmask
+                # for i in range(7): rec.append(bd.readF32()) # unkBitmask
+                for i in range(5): rec.append(bd.readI32())  # unkInts
+
+                records.append(rec)
 
 
+            def readGroup(bd):
+                group = []
+
+                groupStartOffset = bd.tell()
+
+                group.append(Key(bd))         # keyRef01a reference to .01a
+                group.append(bd.readU32())    # groupSizeBytes
+                groupSizeBytes = group[-1]
+                group.append(bd.readU32())    # groupRecordsCount
+                groupRecordsCount = group[-1]
+
+                nonlocal groupRecordsCountSoFar
+                assert(groupRecordsCountSoFar <= totalGroupRecordsCount)
+                assert(groupRecordsCountSoFar + groupRecordsCount <= totalGroupRecordsCount)
+
+                groupRecordsCountSoFar += groupRecordsCount
+
+                records = []
+                for i in range(groupRecordsCount):
+                    readGroupObjectRecord(bd, records)
+
+                assert(bd.tell() == groupStartOffset + groupSizeBytes)
+
+                print(tabulate([group,], floatfmt='.6'))
+                print(tabulate(records, floatfmt='.6'))
+
+                group.append(records)
+
+                return group
 
 
-            bd.seekSet(recHeader.recordStartOffset + recHeader.recordSize)
+
+            print(tabulate([row,], floatfmt='.6'))
+
+            groups = []
+            for i in range(groupsCount):
+                group = readGroup(bd)
+                groups.append(group)
+            row.append(groups)
+
+
+            # print('groupRecordsCountSoFar =', groupRecordsCountSoFar)
+            # print('after groups =', bd.tell())
+
+            assert(groupRecordsCountSoFar == totalGroupRecordsCount)
+
+            assert(bd.tell() == recordEndOffset)
+            bd.seekSet(recordEndOffset)
 
             pass
 
         @staticmethod
         def dump(tab, context):
-            verts = [row[10] for row in tab]
+            #verts = [row[10] for row in tab]
+
+            verts = []
+            #model = row[1]
+            for row in tab:
+                for group in row[7]:
+                    # print(group)
+                    #material = group[0]
+                    for record in group[3]:
+                        verts.append(record[0])
+
+
             dumpRecordPoints(verts, '.points_001.obj', context)
+            dumpData(tab, '.data_001.pickle', context)
             pass
 
 
@@ -609,6 +621,8 @@ def readRecords0BC(bd, context):
     tab = []
     maxColumnCount = 0
     for i in range(context.header.countRecords):
+        # print('\n\n\nrecord #', i)
+
         row = []
         recHeader = CommonRecordHeader(bd)
         row.append(recHeader)
@@ -636,12 +650,12 @@ def readRecords0BC(bd, context):
     print('maxColumnCount =', maxColumnCount)
     headers = range(0, maxColumnCount)
 
-    for r in tab:
-        while len(r) < maxColumnCount:
-            r.append('_')
 
-
-    print(tabulate(tab, headers=headers, floatfmt='.6'))
+    if context.expectedFormat != 0x1:
+        for r in tab:
+            while len(r) < maxColumnCount:
+                r.append('_')
+        print(tabulate(tab, headers=headers, floatfmt='.6'))
     # print(tab)
     # for r in tab:
         # print(r)
@@ -649,6 +663,7 @@ def readRecords0BC(bd, context):
 
     if recHeader.type in formats:
         formats[recHeader.type].dump(tab, context)
+        pass
 
     pass
 
@@ -726,9 +741,11 @@ def exportSpecific0BC(filepath):
     print('filepath =', filepath)
     prepExport0BC(filepath, exportPath)
 
-# filepath = Path(r'd:/ow/fl/06111D3552663A20EF89AC14D4C9413C/0BC/000100000165.0BC')
+filepath = Path(r'd:/ow/fl/06111D3552663A20EF89AC14D4C9413C/0BC/000100000165.0BC')
 # filepath = Path(r'd:/ow/fl/8B79091735A20C086C54C35FA6C51BB7/0BC/00100000066D.0BC')
-# exportSpecific0BC(filepath)
+exportSpecific0BC(filepath)
 
-pathRoot = Path(r'd:/ow/fl/1E6EE3845D0F77AD62EACC08C7D114FF/0BC/')
-exportAll0BC(pathRoot)
+# pathRoot = Path(r'd:/ow/fl/1E6EE3845D0F77AD62EACC08C7D114FF/0BC/')
+# exportAll0BC(pathRoot)
+
+
